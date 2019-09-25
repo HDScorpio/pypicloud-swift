@@ -164,7 +164,15 @@ class OpenStackSwiftStorage(IStorage):
 
     def delete(self, package):
         object_path = get_swift_path(package)
-        self.client.delete_object(self.container, object_path)
+        try:
+            self.client.delete_object(self.container, object_path)
+        except ClientException as e:
+            if e.http_status != 404:
+                LOG.error('Failed to delete object "%s": %s %s',
+                          object_path, self.container,
+                          e.http_status, e.http_reason)
+                if e.http_response_content:
+                    LOG.error(e.http_response_content)
 
     def open(self, package):
         object_path = get_swift_path(package)
