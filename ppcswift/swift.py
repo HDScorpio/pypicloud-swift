@@ -93,7 +93,7 @@ class OpenStackSwiftStorage(IStorage):
         return kwargs
 
     def __init__(self, request, client=None, container=None, **kwargs):
-        super().__init__(request)
+        super(OpenStackSwiftStorage, self).__init__(request)
         self.client = client
         self.container = container
         self.storage_policy = kwargs.get('storage_policy', None)
@@ -110,7 +110,11 @@ class OpenStackSwiftStorage(IStorage):
             raise
 
         for obj_info in objects:
-            name, version, filename = obj_info['name'].split('/')
+            try:
+                name, version, filename = obj_info['name'].split('/', 3)
+            except ValueError:
+                LOG.warning('The object is not like a package: %s', obj_info)
+                continue
             last_modified = datetime.strptime(obj_info['last_modified'],
                                               '%Y-%m-%dT%H:%M:%S.%f')
             # Get package metadata from object metadata
@@ -120,6 +124,7 @@ class OpenStackSwiftStorage(IStorage):
                 if SWIFT_METADATA_KEY_PREFIX not in k:
                     continue
                 key = k[SWIFT_METADATA_KEY_PREFIX_LEN:]
+                # Skip metadata that get from object path
                 if key in ('name', 'version', 'filename', 'last_modified'):
                     continue
                 metadata[key] = v
@@ -173,10 +178,11 @@ class OpenStackSwiftStorage(IStorage):
         except ClientException as e:
             LOG.warning('Failed to check storage health: %s', e)
             return False, str(e)
+        return True, ''
 
 
 def get_swift_path(package):
-    return '%s/%s/%s/' % (package.name, package.version, package.filename)
+    return '%s/%s/%s' % (package.name, package.version, package.filename)
 
 
 def create_container(client, name, policy=None):
