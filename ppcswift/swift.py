@@ -68,7 +68,8 @@ class OpenStackSwiftStorage(IStorage):
                 'project_name': config.get('project_name', None),
                 'endpoint_type': config.get('endpoint_type', None),
                 'region_name': config.get('region_name', None),
-            }
+            },
+            'force_auth_retry': True
         }
 
         client = Connection(**options)
