@@ -32,5 +32,6 @@ setup(
     install_requires=[
         'pypicloud',
         'python-swiftclient'
-    ]
+    ],
+    packages=['ppcswift']
 )

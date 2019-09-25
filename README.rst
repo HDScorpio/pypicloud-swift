@@ -1,8 +1,8 @@
 PyPICloud-swift
 ===============
-PyPICloud-swift - OpenStack Swift storage backend for PyPICloud.
+PyPICloud-swift - OpenStack Swift storage backend for `PyPICloud <https://pypi.org/project/pypicloud/>`_.
 
-Swift interaction is done using `python-swiftclient <https://pypi.org/project/python-swiftclient/>`
+Swift interaction is done using `python-swiftclient <https://pypi.org/project/python-swiftclient/>`_
 Connection API.
 
 Configure
@@ -11,8 +11,8 @@ Configure storage backend in config field ``pypi.storage``, container name in
 ``storage.container`` and authentication options.
 Example::
 
-    pypi.storage = pypicloud-swift.swift.OpenStackSwiftStorage
-    storage.container = pypicloud_swift_backend
+    pypi.storage = ppcswift.OpenStackSwiftStorage
+    storage.container = pypicloud
     storage.auth_token = b0bb9dbc868d490288b5682a295fad0e
     storage.storage_url = http://127.0.0.1:8080/v1/AUTH_b0bb9dbc868d490288b5682a295fad0e
 
