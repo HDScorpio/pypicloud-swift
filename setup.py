@@ -3,7 +3,7 @@ from setuptools import setup
 
 setup(
     name='pypicloud-swift',
-    version='0.1.1',
+    version='0.1.2',
     description='OpenStack Swift storage for PyPI Cloud',
     long_description=open("README.rst").read(),
     classifiers=[

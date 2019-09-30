@@ -40,5 +40,8 @@ Configuration options
 - ``storage.storage_policy``
 - ``storage.container``
 
+.. note:: use at least options ``storage.auth_url``, ``storage.username`` and
+   ``storage.key`` for keystone auth so swiftclient can reauthenticate.
+
 If container is not existing on startup or listing (rebuild package list)
 it will be created with storage policy ``storage.storage_policy``.

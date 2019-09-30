@@ -6,10 +6,12 @@ from datetime import datetime
 from pypicloud.storage.base import IStorage
 from pypicloud.models import Package
 from pypicloud.util import get_settings
+from pyramid.httpexceptions import HTTPOk
+from pyramid.httpexceptions import HTTPInternalServerError
 
 from swiftclient import Connection, ClientException
+import six
 
-from pyramid.response import Response
 
 LOG = logging.getLogger(__name__)
 SWIFT_METADATA_KEY_PREFIX = 'x-object-meta-pypicloud-'
@@ -108,7 +110,8 @@ class OpenStackSwiftStorage(IStorage):
                 create_container(self.client, self.container,
                                  self.storage_policy)
                 return
-            raise
+            LOG.error('Error while listing container: %s', e)
+            raise HTTPInternalServerError()
 
         for obj_info in objects:
             try:
@@ -119,7 +122,13 @@ class OpenStackSwiftStorage(IStorage):
             last_modified = datetime.strptime(obj_info['last_modified'],
                                               '%Y-%m-%dT%H:%M:%S.%f')
             # Get package metadata from object metadata
-            headers = self.client.head_object(self.container, obj_info['name'])
+            try:
+                headers = self.client.head_object(self.container,
+                                                  obj_info['name'])
+            except ClientException as e:
+                LOG.warning('Can\'t get object metadata "%s": %s',
+                            obj_info['name'], e)
+                continue
             metadata = {}
             for k, v in headers.items():
                 if SWIFT_METADATA_KEY_PREFIX not in k:
@@ -137,18 +146,13 @@ class OpenStackSwiftStorage(IStorage):
         try:
             headers, obj = self.client.get_object(self.container, object_path,
                                                   resp_chunk_size=65536)
-            resp = Response(
-                content_type=headers['content-type'],
-                content_length=headers['content-length'],
-                app_iter=obj,
-                conditional_response=True)
+            content_type = six.ensure_str(headers.get('content-type'))
+            resp = HTTPOk(content_type=content_type, app_iter=obj,
+                          conditional_response=True)
         except ClientException as e:
-            resp = Response(
-                status=e.http_status,
-                body=e.http_response_content,
-                content_type=e.http_response_headers['content-type'],
-                content_length=e.http_response_headers['content-length'])
-            return resp
+            LOG.error('Failed to get object "%s": %s',
+                      object_path, e)
+            resp = HTTPInternalServerError()
 
         return resp
 
@@ -157,11 +161,16 @@ class OpenStackSwiftStorage(IStorage):
         metadata = {}
         if package.summary:
             metadata['%ssummary' % SWIFT_METADATA_KEY_PREFIX] = package.summary
-        self.client.put_object(
-            self.container,
-            object_path,
-            datastream,
-            headers=metadata)
+        try:
+            self.client.put_object(
+                self.container,
+                object_path,
+                datastream,
+                headers=metadata)
+        except ClientException as e:
+            LOG.error('Failed to put object "%s": %s',
+                      object_path, e)
+            raise HTTPInternalServerError()
 
     def delete(self, package):
         object_path = get_swift_path(package)
@@ -177,15 +186,19 @@ class OpenStackSwiftStorage(IStorage):
 
     def open(self, package):
         object_path = get_swift_path(package)
-        headers, obj = self.client.get_object(self.container, object_path,
-                                              resp_chunk_size=65536)
+        try:
+            headers, obj = self.client.get_object(self.container, object_path,
+                                                  resp_chunk_size=65536)
+        except ClientException as e:
+            LOG.error('Failed to get object "%s": %s', object_path, e)
+            raise HTTPInternalServerError()
         return closing(obj)
 
     def check_health(self):
         try:
             self.client.head_container(self.container)
         except ClientException as e:
-            LOG.warning('Failed to check storage health: %s', e)
+            LOG.warning('Failed to get container metadata: %s', e)
             return False, str(e)
         return True, ''
 
