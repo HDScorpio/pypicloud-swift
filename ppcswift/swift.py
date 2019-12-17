@@ -218,9 +218,11 @@ class OpenStackSwiftStorage(IStorage):
                 headers=metadata)
         except ClientException as e:
             if (e.http_status == 400 and
-                    'metadata' in e.http_response_content.lower()):
+                    'metadata' in e.http_response_content.lower() and
+                    hasattr(datastream, 'seek')):
                 LOG.warning('Metadata limits exceed: %s',
                             e.http_response_content)
+                datastream.seek(0)
                 try:
                     self.client.put_object(self.container, object_path,
                                            datastream)
