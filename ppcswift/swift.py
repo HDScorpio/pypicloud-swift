@@ -14,18 +14,19 @@ import six
 
 
 LOG = logging.getLogger(__name__)
-SWIFT_METADATA_KEY_PREFIX = 'x-object-meta-pypicloud-'
+SWIFT_KEY_SUMMARY_DEPRECATED = 'x-object-meta-pypicloud-summary'
+SWIFT_METADATA_KEY_PREFIX = 'x-object-meta-pypi'
 SWIFT_METADATA_KEY_PREFIX_LEN = len(SWIFT_METADATA_KEY_PREFIX)
 
 
 class OpenStackSwiftStorage(IStorage):
-
     """ Storage backend that uses OpenStack Swift """
 
     @classmethod
     def configure(cls, settings):
         kwargs = super(OpenStackSwiftStorage, cls).configure(settings)
 
+        # noinspection PyTypeChecker
         config = get_settings(
             settings,
             "storage.",
@@ -79,6 +80,13 @@ class OpenStackSwiftStorage(IStorage):
         storage_policy = config.get('storage_policy', None)
 
         try:
+            caps = client.get_capabilities()
+            LOG.debug('Swift capabilities: %s', caps)
+            kwargs['swift'] = caps['swift']
+        except ClientException as e:
+            LOG.warning("Can't get swift capabilities: %s", e)
+
+        try:
             headers = client.head_container(container)
             LOG.info('Container exist: object_count = %s, bytes_used = %s',
                      headers['x-container-object-count'],
@@ -100,6 +108,10 @@ class OpenStackSwiftStorage(IStorage):
         self.client = client
         self.container = container
         self.storage_policy = kwargs.get('storage_policy', None)
+        limits = kwargs.get('swift', {})
+        self.max_meta_value_length = limits.get('max_meta_value_length', 256)
+        self.max_meta_count = limits.get('max_meta_count', 90)
+        self.max_meta_overall_size = limits.get('max_meta_overall_size', 4096)
 
     def list(self, factory=Package):
         try:
@@ -130,14 +142,35 @@ class OpenStackSwiftStorage(IStorage):
                             obj_info['name'], e)
                 continue
             metadata = {}
+            summary_chunks = {}
             for k, v in headers.items():
                 if SWIFT_METADATA_KEY_PREFIX not in k:
                     continue
-                key = k[SWIFT_METADATA_KEY_PREFIX_LEN:]
-                # Skip metadata that get from object path
+                if k == SWIFT_KEY_SUMMARY_DEPRECATED:
+                    metadata['summary'] = v
+                    continue
+
+                key = k[SWIFT_METADATA_KEY_PREFIX_LEN + 1:]
                 if key in ('name', 'version', 'filename', 'last_modified'):
                     continue
-                metadata[key] = v
+
+                if 'summary' in key:
+                    try:
+                        chunk_num = int(key.split('summary-', 1)[1])
+                    except ValueError:
+                        LOG.warning('Can\'t parse summary chunk metadata '
+                                    'of object "%s": key = %s, value = %s',
+                                    obj_info['name'], key, v)
+                    else:
+                        summary_chunks[chunk_num] = v
+                else:
+                    metadata[key] = v
+
+            if summary_chunks:
+                summary = ''
+                for k in sorted(summary_chunks.keys()):
+                    summary += summary_chunks[k]
+                metadata['summary'] = summary
 
             yield factory(name, version, filename, last_modified, **metadata)
 
@@ -160,17 +193,45 @@ class OpenStackSwiftStorage(IStorage):
         object_path = get_swift_path(package)
         metadata = {}
         if package.summary:
-            metadata['%ssummary' % SWIFT_METADATA_KEY_PREFIX] = package.summary
+            summary_len = len(package.summary)
+            meta_index = 0
+            pos = 0
+            meta_overall_size = 0
+            while (pos < summary_len and
+                   meta_index < self.max_meta_count):
+                key = '%s-summary-%d' % (SWIFT_METADATA_KEY_PREFIX, meta_index)
+                value = package.summary[pos:pos + self.max_meta_value_length]
+                meta_overall_size += len(key) + len(value)
+                if meta_overall_size > self.max_meta_overall_size:
+                    break
+                metadata[key] = value
+                pos += len(value)
+                meta_index += 1
+
         try:
+            LOG.debug('PUT object "%s" with metadata: %s',
+                      object_path, metadata)
             self.client.put_object(
                 self.container,
                 object_path,
                 datastream,
                 headers=metadata)
         except ClientException as e:
-            LOG.error('Failed to put object "%s": %s',
-                      object_path, e)
-            raise HTTPInternalServerError()
+            if (e.http_status == 400 and
+                    'metadata' in e.http_response_content.lower() and
+                    hasattr(datastream, 'seek')):
+                LOG.warning('Metadata limits exceed: %s',
+                            e.http_response_content)
+                datastream.seek(0)
+                try:
+                    self.client.put_object(self.container, object_path,
+                                           datastream)
+                except ClientException as e:
+                    LOG.error('Failed to put object "%s": %s', object_path, e)
+                    raise HTTPInternalServerError()
+            else:
+                LOG.error('Failed to put object "%s": %s', object_path, e)
+                raise HTTPInternalServerError()
 
     def delete(self, package):
         object_path = get_swift_path(package)
