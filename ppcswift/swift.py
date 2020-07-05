@@ -1,4 +1,5 @@
 """ Store packages in Openstack Swift object storage """
+import json
 import logging
 from contextlib import closing
 from datetime import datetime
@@ -10,7 +11,6 @@ from pyramid.httpexceptions import HTTPOk
 from pyramid.httpexceptions import HTTPInternalServerError
 
 from swiftclient import Connection, ClientException
-import six
 
 
 LOG = logging.getLogger(__name__)
@@ -79,12 +79,20 @@ class OpenStackSwiftStorage(IStorage):
         container = config.get('container')
         storage_policy = config.get('storage_policy', None)
 
-        try:
-            caps = client.get_capabilities()
-            LOG.debug('Swift capabilities: %s', caps)
-            kwargs['swift'] = caps['swift']
-        except ClientException as e:
-            LOG.warning("Can't get swift capabilities: %s", e)
+        if storage_policy:
+            try:
+                caps = client.get_capabilities()
+                LOG.debug('Swift capabilities: %s', caps)
+            except ClientException as e:
+                LOG.warning("Can't get swift capabilities: %s", e)
+            else:
+                policies = set()
+                for policy in caps.get('swift', {}).get('policies', []):
+                    policies.add(policy.get('name', '').lower())
+                    for alias in policy.get('aliases', '').split(','):
+                        policies.add(alias.strip().lower())
+                if policies and storage_policy.lower() not in policies:
+                    kwargs['storage_policy'] = storage_policy
 
         try:
             headers = client.head_container(container)
@@ -100,7 +108,6 @@ class OpenStackSwiftStorage(IStorage):
 
         kwargs['client'] = client
         kwargs['container'] = container
-        kwargs['storage_policy'] = storage_policy
         return kwargs
 
     def __init__(self, request, client=None, container=None, **kwargs):
@@ -108,10 +115,61 @@ class OpenStackSwiftStorage(IStorage):
         self.client = client
         self.container = container
         self.storage_policy = kwargs.get('storage_policy', None)
-        limits = kwargs.get('swift', {})
-        self.max_meta_value_length = limits.get('max_meta_value_length', 256)
-        self.max_meta_count = limits.get('max_meta_count', 90)
-        self.max_meta_overall_size = limits.get('max_meta_overall_size', 4096)
+
+    @staticmethod
+    def get_path(package):
+        return '%s/%s/%s' % (package.name, package.version, package.filename)
+
+    @staticmethod
+    def path_to_meta_path(path):
+        return path + '.meta'
+
+    def get_meta_path(self, package):
+        return self.path_to_meta_path(self.get_path(package))
+
+    def _get_old_metadata(self, object_path):
+        """ Parse old package metadata stored in object user metadata
+
+        version of old metadata format: 0.2.0
+        """
+        try:
+            headers = self.client.head_object(self.container, object_path)
+        except ClientException as e:
+            LOG.warning('Can\'t get old package metadata "%s": %s',
+                        object_path, e)
+            return
+
+        metadata = {}
+        summary_chunks = {}
+        for k, v in headers.items():
+            if SWIFT_METADATA_KEY_PREFIX not in k:
+                continue
+            if k == SWIFT_KEY_SUMMARY_DEPRECATED:
+                metadata['summary'] = v
+                continue
+
+            key = k[SWIFT_METADATA_KEY_PREFIX_LEN + 1:]
+            if key in ('name', 'version', 'filename', 'last_modified'):
+                continue
+
+            if 'summary' in key:
+                try:
+                    chunk_num = int(key.split('summary-', 1)[1])
+                except ValueError:
+                    LOG.warning('Can\'t parse summary chunk metadata '
+                                'of object "%s": key = %s, value = %s',
+                                object_path, key, v)
+                else:
+                    summary_chunks[chunk_num] = v
+            else:
+                metadata[key] = v
+
+        if summary_chunks:
+            summary = ''
+            for k in sorted(summary_chunks.keys()):
+                summary += summary_chunks[k]
+            metadata['summary'] = summary
+        return metadata
 
     def list(self, factory=Package):
         try:
@@ -126,61 +184,42 @@ class OpenStackSwiftStorage(IStorage):
             raise HTTPInternalServerError()
 
         for obj_info in objects:
+            object_path = obj_info['name']
+            if object_path.endswith('.meta'):
+                continue
             try:
-                name, version, filename = obj_info['name'].split('/', 3)
+                name, version, filename = object_path.split('/', 3)
             except ValueError:
                 LOG.warning('The object is not like a package: %s', obj_info)
                 continue
             last_modified = datetime.strptime(obj_info['last_modified'],
                                               '%Y-%m-%dT%H:%M:%S.%f')
-            # Get package metadata from object metadata
+            object_meta_path = self.path_to_meta_path(object_path)
             try:
-                headers = self.client.head_object(self.container,
-                                                  obj_info['name'])
+                # Get package metadata from object
+                headers, data = self.client.get_object(
+                    self.container, object_meta_path)
             except ClientException as e:
-                LOG.warning('Can\'t get object metadata "%s": %s',
-                            obj_info['name'], e)
-                continue
-            metadata = {}
-            summary_chunks = {}
-            for k, v in headers.items():
-                if SWIFT_METADATA_KEY_PREFIX not in k:
+                if e.http_status != 404:
+                    LOG.warning('Can\'t get package metadata "%s": %s',
+                                object_meta_path, e)
                     continue
-                if k == SWIFT_KEY_SUMMARY_DEPRECATED:
-                    metadata['summary'] = v
-                    continue
-
-                key = k[SWIFT_METADATA_KEY_PREFIX_LEN + 1:]
-                if key in ('name', 'version', 'filename', 'last_modified'):
-                    continue
-
-                if 'summary' in key:
-                    try:
-                        chunk_num = int(key.split('summary-', 1)[1])
-                    except ValueError:
-                        LOG.warning('Can\'t parse summary chunk metadata '
-                                    'of object "%s": key = %s, value = %s',
-                                    obj_info['name'], key, v)
-                    else:
-                        summary_chunks[chunk_num] = v
                 else:
-                    metadata[key] = v
-
-            if summary_chunks:
-                summary = ''
-                for k in sorted(summary_chunks.keys()):
-                    summary += summary_chunks[k]
-                metadata['summary'] = summary
+                    # metadata stored in old place
+                    metadata = self._get_old_metadata(object_path)
+            else:
+                metadata = json.loads(data)
+            metadata = Package.read_metadata(metadata or {})
 
             yield factory(name, version, filename, last_modified, **metadata)
 
     def download_response(self, package):
-        object_path = get_swift_path(package)
+        object_path = self.get_path(package)
         try:
-            headers, obj = self.client.get_object(self.container, object_path,
-                                                  resp_chunk_size=65536)
-            content_type = six.ensure_str(headers.get('content-type'))
-            resp = HTTPOk(content_type=content_type, app_iter=obj,
+            headers, data = self.client.get_object(self.container, object_path,
+                                                   resp_chunk_size=65536)
+            content_type = headers.get('content-type')
+            resp = HTTPOk(content_type=content_type, app_iter=data,
                           conditional_response=True)
         except ClientException as e:
             LOG.error('Failed to get object "%s": %s',
@@ -190,70 +229,55 @@ class OpenStackSwiftStorage(IStorage):
         return resp
 
     def upload(self, package, datastream):
-        object_path = get_swift_path(package)
-        metadata = {}
-        if package.summary:
-            summary_len = len(package.summary)
-            meta_index = 0
-            pos = 0
-            meta_overall_size = 0
-            while (pos < summary_len and
-                   meta_index < self.max_meta_count):
-                key = '%s-summary-%d' % (SWIFT_METADATA_KEY_PREFIX, meta_index)
-                value = package.summary[pos:pos + self.max_meta_value_length]
-                meta_overall_size += len(key) + len(value)
-                if meta_overall_size > self.max_meta_overall_size:
-                    break
-                metadata[key] = value
-                pos += len(value)
-                meta_index += 1
+        object_path = self.get_path(package)
 
+        LOG.debug('PUT package "%s"', object_path)
         try:
-            LOG.debug('PUT object "%s" with metadata: %s',
-                      object_path, metadata)
-            self.client.put_object(
-                self.container,
-                object_path,
-                datastream,
-                headers=metadata)
+            self.client.put_object(self.container, object_path, datastream)
         except ClientException as e:
-            if (e.http_status == 400 and
-                    'metadata' in e.http_response_content.lower() and
-                    hasattr(datastream, 'seek')):
-                LOG.warning('Metadata limits exceed: %s',
-                            e.http_response_content)
-                datastream.seek(0)
-                try:
-                    self.client.put_object(self.container, object_path,
-                                           datastream)
-                except ClientException as e:
-                    LOG.error('Failed to put object "%s": %s', object_path, e)
-                    raise HTTPInternalServerError()
-            else:
-                LOG.error('Failed to put object "%s": %s', object_path, e)
-                raise HTTPInternalServerError()
+            LOG.error('Failed to store package "%s": %s', object_path, e)
+            raise HTTPInternalServerError()
+
+        object_meta_path = self.get_meta_path(package)
+        metadata = json.dumps(package.get_metadata())
+        LOG.debug('PUT package metadata "%s"', object_meta_path)
+        try:
+            self.client.put_object(self.container, object_meta_path, metadata)
+        except ClientException as e:
+            LOG.error('Failed to store package metadata "%s": %s',
+                      object_meta_path, e)
+            raise HTTPInternalServerError()
 
     def delete(self, package):
-        object_path = get_swift_path(package)
+        object_path = self.get_path(package)
         try:
             self.client.delete_object(self.container, object_path)
         except ClientException as e:
             if e.http_status != 404:
-                LOG.error('Failed to delete object "%s": %s %s',
-                          object_path, self.container,
-                          e.http_status, e.http_reason)
+                LOG.error('Failed to delete package "%s": %s %s',
+                          object_path, e.http_status, e.http_reason)
+                if e.http_response_content:
+                    LOG.error(e.http_response_content)
+
+        object_meta_path = self.get_meta_path(package)
+        try:
+            self.client.delete_object(self.container, object_meta_path)
+        except ClientException as e:
+            if e.http_status != 404:
+                LOG.error('Failed to delete package metadata "%s": %s %s',
+                          object_path, e.http_status, e.http_reason)
                 if e.http_response_content:
                     LOG.error(e.http_response_content)
 
     def open(self, package):
-        object_path = get_swift_path(package)
+        object_path = self.get_path(package)
         try:
-            headers, obj = self.client.get_object(self.container, object_path,
-                                                  resp_chunk_size=65536)
+            headers, data = self.client.get_object(self.container, object_path,
+                                                   resp_chunk_size=65536)
         except ClientException as e:
-            LOG.error('Failed to get object "%s": %s', object_path, e)
+            LOG.error('Failed to get package "%s": %s', object_path, e)
             raise HTTPInternalServerError()
-        return closing(obj)
+        return closing(data)
 
     def check_health(self):
         try:
@@ -262,10 +286,6 @@ class OpenStackSwiftStorage(IStorage):
             LOG.warning('Failed to get container metadata: %s', e)
             return False, str(e)
         return True, ''
-
-
-def get_swift_path(package):
-    return '%s/%s/%s' % (package.name, package.version, package.filename)
 
 
 def create_container(client, name, policy=None):

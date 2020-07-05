@@ -1,2 +1,2 @@
-pypicloud
+pypicloud >= 0.14.0
 python-swiftclient

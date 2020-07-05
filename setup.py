@@ -3,16 +3,15 @@ from setuptools import setup
 
 setup(
     name='pypicloud-swift',
-    version='0.2.0',
+    version='0.3.0',
     description='OpenStack Swift storage for PyPI Cloud',
     long_description=open("README.rst").read(),
     classifiers=[
         'Programming Language :: Python',
-        'Programming Language :: Python :: 2',
-        'Programming Language :: Python :: 2.7',
         'Programming Language :: Python :: 3',
         'Programming Language :: Python :: 3.5',
         'Programming Language :: Python :: 3.6',
+        'Programming Language :: Python :: 3.7',
         'Environment :: OpenStack',
         'Environment :: Plugins',
         'Environment :: Web Environment',
@@ -30,8 +29,9 @@ setup(
     keywords='pypi package openstack swift object storage',
     platforms='any',
     install_requires=[
-        'pypicloud',
+        'pypicloud >= 1.0.14',
         'python-swiftclient'
     ],
+    python_requires='>=3.5',
     packages=['ppcswift']
 )
