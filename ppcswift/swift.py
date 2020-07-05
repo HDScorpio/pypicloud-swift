@@ -10,13 +10,19 @@ from pypicloud.util import get_settings
 from pyramid.httpexceptions import HTTPOk
 from pyramid.httpexceptions import HTTPInternalServerError
 
-from swiftclient import Connection, ClientException
+from swiftclient import Connection
+from swiftclient import ClientException
+from swiftclient import swiftclient_version
+
+from ppcswift._version import __version__
 
 
 LOG = logging.getLogger(__name__)
 SWIFT_KEY_SUMMARY_DEPRECATED = 'x-object-meta-pypicloud-summary'
 SWIFT_METADATA_KEY_PREFIX = 'x-object-meta-pypi'
 SWIFT_METADATA_KEY_PREFIX_LEN = len(SWIFT_METADATA_KEY_PREFIX)
+USER_AGENT = 'pypicloud-swift/%s python-swiftclient/%s' % (
+    __version__, swiftclient_version.version_string)
 
 
 class OpenStackSwiftStorage(IStorage):
@@ -95,7 +101,8 @@ class OpenStackSwiftStorage(IStorage):
                     kwargs['storage_policy'] = storage_policy
 
         try:
-            headers = client.head_container(container)
+            headers = client.head_container(
+                container, headers={'user-agent': USER_AGENT})
             LOG.info('Container exist: object_count = %s, bytes_used = %s',
                      headers['x-container-object-count'],
                      headers['x-container-bytes-used'])
@@ -133,7 +140,10 @@ class OpenStackSwiftStorage(IStorage):
         version of old metadata format: 0.2.0
         """
         try:
-            headers = self.client.head_object(self.container, object_path)
+            headers = self.client.head_object(
+                self.container,
+                object_path,
+                headers={'user-agent': USER_AGENT})
         except ClientException as e:
             LOG.warning('Can\'t get old package metadata "%s": %s',
                         object_path, e)
@@ -173,7 +183,8 @@ class OpenStackSwiftStorage(IStorage):
 
     def list(self, factory=Package):
         try:
-            headers, objects = self.client.get_container(self.container)
+            headers, objects = self.client.get_container(
+                self.container, headers={'user-agent': USER_AGENT})
         except ClientException as e:
             if e.http_status == 404:
                 LOG.warning('Container was removed')
@@ -198,7 +209,8 @@ class OpenStackSwiftStorage(IStorage):
             try:
                 # Get package metadata from object
                 headers, data = self.client.get_object(
-                    self.container, object_meta_path)
+                    self.container, object_meta_path,
+                    headers={'user-agent': USER_AGENT})
             except ClientException as e:
                 if e.http_status != 404:
                     LOG.warning('Can\'t get package metadata "%s": %s',
@@ -216,8 +228,9 @@ class OpenStackSwiftStorage(IStorage):
     def download_response(self, package):
         object_path = self.get_path(package)
         try:
-            headers, data = self.client.get_object(self.container, object_path,
-                                                   resp_chunk_size=65536)
+            headers, data = self.client.get_object(
+                self.container, object_path, resp_chunk_size=65536,
+                headers={'user-agent': USER_AGENT})
             content_type = headers.get('content-type')
             resp = HTTPOk(content_type=content_type, app_iter=data,
                           conditional_response=True)
@@ -233,7 +246,8 @@ class OpenStackSwiftStorage(IStorage):
 
         LOG.debug('PUT package "%s"', object_path)
         try:
-            self.client.put_object(self.container, object_path, datastream)
+            self.client.put_object(self.container, object_path, datastream,
+                                   headers={'user-agent': USER_AGENT})
         except ClientException as e:
             LOG.error('Failed to store package "%s": %s', object_path, e)
             raise HTTPInternalServerError()
@@ -242,7 +256,8 @@ class OpenStackSwiftStorage(IStorage):
         metadata = json.dumps(package.get_metadata())
         LOG.debug('PUT package metadata "%s"', object_meta_path)
         try:
-            self.client.put_object(self.container, object_meta_path, metadata)
+            self.client.put_object(self.container, object_meta_path, metadata,
+                                   headers={'user-agent': USER_AGENT})
         except ClientException as e:
             LOG.error('Failed to store package metadata "%s": %s',
                       object_meta_path, e)
@@ -251,7 +266,8 @@ class OpenStackSwiftStorage(IStorage):
     def delete(self, package):
         object_path = self.get_path(package)
         try:
-            self.client.delete_object(self.container, object_path)
+            self.client.delete_object(self.container, object_path,
+                                      headers={'user-agent': USER_AGENT})
         except ClientException as e:
             if e.http_status != 404:
                 LOG.error('Failed to delete package "%s": %s %s',
@@ -261,7 +277,8 @@ class OpenStackSwiftStorage(IStorage):
 
         object_meta_path = self.get_meta_path(package)
         try:
-            self.client.delete_object(self.container, object_meta_path)
+            self.client.delete_object(self.container, object_meta_path,
+                                      headers={'user-agent': USER_AGENT})
         except ClientException as e:
             if e.http_status != 404:
                 LOG.error('Failed to delete package metadata "%s": %s %s',
@@ -272,8 +289,9 @@ class OpenStackSwiftStorage(IStorage):
     def open(self, package):
         object_path = self.get_path(package)
         try:
-            headers, data = self.client.get_object(self.container, object_path,
-                                                   resp_chunk_size=65536)
+            headers, data = self.client.get_object(
+                self.container, object_path, resp_chunk_size=65536,
+                headers={'user-agent': USER_AGENT})
         except ClientException as e:
             LOG.error('Failed to get package "%s": %s', object_path, e)
             raise HTTPInternalServerError()
@@ -281,7 +299,8 @@ class OpenStackSwiftStorage(IStorage):
 
     def check_health(self):
         try:
-            self.client.head_container(self.container)
+            self.client.head_container(self.container,
+                                       headers={'user-agent': USER_AGENT})
         except ClientException as e:
             LOG.warning('Failed to get container metadata: %s', e)
             return False, str(e)
@@ -290,7 +309,7 @@ class OpenStackSwiftStorage(IStorage):
 
 def create_container(client, name, policy=None):
     LOG.warning('Create container "%s"', name)
-    headers = None
+    headers = {'user-agent': USER_AGENT}
     if policy:
-        headers = {'x-storage-policy': policy}
+        headers['x-storage-policy'] = policy
     client.put_container(name, headers=headers)

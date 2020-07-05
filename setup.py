@@ -1,9 +1,14 @@
 from setuptools import setup
 
 
+__version__ = None
+with open('ppcswift/_version.py', 'r') as f:
+    exec(f.read())
+
+
 setup(
     name='pypicloud-swift',
-    version='0.3.0',
+    version=__version__,
     description='OpenStack Swift storage for PyPI Cloud',
     long_description=open("README.rst").read(),
     classifiers=[
